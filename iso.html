@@ -22,8 +22,9 @@ const config = {
 const game = new Phaser.Game(config);
 
 // Isometric helpers
-const TILE_W = 64;
-const TILE_H = 32;
+const TILE_W = 40;
+const TILE_H = 20;
+const UNIT_SIZE = 16; // (A) Shrink from 32px to 16px
 
 function cartToIso(x, y) {
   return {
@@ -41,17 +42,22 @@ function isoToCart(x, y) {
 
 let units = [];
 let enemies = [];
-let selectedUnit = null;
+let selectedUnits = []; // Changed from selectedUnit to array
 let hq = null;
 let zones = [];
 let playerMoney = 100;
 let moneyText = null;
 let spawnCost = 50;
+let buildingPositions = []; // For minimap rendering
 
 let gridW = 20;
 let gridH = 20;
 let offsetX = 600;
 let offsetY = 100;
+
+// Drag selection
+let dragStart = null;
+let dragBox = null;
 
 function create() {
   this.input.mouse.disableContextMenu();
@@ -70,16 +76,22 @@ function create() {
   this.add.text(1080, 18, 'vs', {fontSize:'14px', color:'#9ca3af'}).setOrigin(0.5).setDepth(201);
   this.add.text(1120, 18, 'RIVALS', {fontSize:'16px', color:'#ef4444', fontStyle:'bold'}).setDepth(201);
   
-  // === BOTTOM HUD BAR ===
-  let botBar = this.add.rectangle(600, 650, 1200, 50, 0x0A0D12, 0.95);
+  // === BOTTOM HUD BAR (E: nested borders + darker backing) ===
+  let botBar = this.add.rectangle(600, 650, 1200, 50, 0x05070C, 0.98);
   botBar.setDepth(200);
   
-  let minimapBg = this.add.rectangle(20, 630, 160, 90, 0x161D2B, 1);
+  // Minimap panel (nested border)
+  let minimapOuter = this.add.rectangle(20, 630, 164, 94, 0x0A0D12, 1);
+  minimapOuter.setOrigin(0, 1);
+  minimapOuter.setStrokeStyle(1, 0x1E2636);
+  minimapOuter.setDepth(201);
+  
+  let minimapBg = this.add.rectangle(22, 628, 160, 90, 0x0F131C, 1);
   minimapBg.setOrigin(0, 1);
   minimapBg.setStrokeStyle(2, 0x38bdf8);
-  minimapBg.setDepth(201);
+  minimapBg.setDepth(202);
   
-  this.add.text(100, 632, 'MINIMAP', {fontSize:'12px', color:'#6b7280'}).setOrigin(0.5, 0).setDepth(201);
+  this.add.text(102, 634, 'MINIMAP', {fontSize:'11px', color:'#4b5563', fontStyle:'bold'}).setOrigin(0.5, 0).setDepth(203);
   
   this.add.text(250, 632, 'UNIT SELECTION', {fontSize:'12px', color:'#6b7280'}).setOrigin(0, 0).setDepth(201);
   this.add.text(900, 632, 'INFO PANEL', {fontSize:'12px', color:'#6b7280'}).setOrigin(0, 0).setDepth(201);
@@ -93,8 +105,8 @@ function create() {
       let x = iso.x + offsetX;
       let y = iso.y + offsetY;
       
-      // Street tiles (darker)
-      gridGfx.fillStyle(0x1e293b, 1);
+      // Street tiles with asphalt texture (B)
+      gridGfx.fillStyle(0x1a1f2e, 1);
       gridGfx.beginPath();
       gridGfx.moveTo(x, y);
       gridGfx.lineTo(x + TILE_W/2, y + TILE_H/2);
@@ -103,14 +115,22 @@ function create() {
       gridGfx.closePath();
       gridGfx.fillPath();
       
-      // Grid lines
-      gridGfx.lineStyle(1, 0x334155, 0.5);
+      // Asphalt noise pattern
+      gridGfx.fillStyle(0x252a3a, 0.3);
+      for(let n = 0; n < 8; n++) {
+        let nx = x + (Math.random() - 0.5) * TILE_W * 0.6;
+        let ny = y + (Math.random() - 0.5) * TILE_H;
+        gridGfx.fillRect(nx, ny, 2, 2);
+      }
+      
+      // Grid lines (darker, thicker)
+      gridGfx.lineStyle(1.5, 0x0f1419, 0.8);
       gridGfx.strokePath();
     }
   }
   
   // === BACKGROUND BUILDINGS (decoration) ===
-  let buildingPositions = [
+  buildingPositions = [
     {x:1, y:1, w:1, h:2, color:0x374151},
     {x:7, y:1, w:2, h:3, color:0x475569},
     {x:11, y:2, w:1, h:2, color:0x4b5563},
@@ -154,35 +174,77 @@ function create() {
     ], rightColor);
     rightWall.setStrokeStyle(2, 0x000000);
     
-    // Roof
+    // Roof (top face)
+    let roofColor = Phaser.Display.Color.IntegerToColor(bp.color);
+    roofColor = Phaser.Display.Color.GetColor(
+      Math.min(255, roofColor.r + 40),
+      Math.min(255, roofColor.g + 40),
+      Math.min(255, roofColor.b + 40)
+    );
+    
     let roof = this.add.polygon(0, -buildingHeight, [
       0, 0,
       TILE_W/2 * bp.w, TILE_H/2 * bp.w,
       0, TILE_H * bp.w,
       -TILE_W/2 * bp.w, TILE_H/2 * bp.w
-    ], 0x64748b);
+    ], roofColor);
     roof.setStrokeStyle(2, 0x000000);
     
-    // Windows (random placement)
-    for(let i=0; i<bp.h; i++) {
-      if(Math.random() > 0.3) {
-        let wx = (Math.random() - 0.5) * TILE_W * bp.w * 0.5;
-        let wy = -buildingHeight + 10 + i * 15;
-        let win = this.add.rectangle(wx, wy, 6, 8, 0xfcd34d, 0.8);
-        building.add(win);
+    // === BUILDING FACADE DETAILS (G) ===
+    // Windows on left wall
+    let windowRows = Math.floor(bp.h);
+    for(let row = 0; row < windowRows; row++) {
+      let wy = TILE_H/2 * bp.w - 10 - (row * 20);
+      
+      // Window (cyan glow)
+      let window1 = this.add.rectangle(-TILE_W/4 * bp.w, wy, 4, 6, 0x0ea5e9);
+      window1.setStrokeStyle(1, 0x000000);
+      building.add(window1);
+    }
+    
+    // Windows on right wall
+    for(let row = 0; row < windowRows; row++) {
+      let wy = TILE_H/2 * bp.w - 10 - (row * 20);
+      
+      let window2 = this.add.rectangle(TILE_W/4 * bp.w, wy, 4, 6, 0x0ea5e9);
+      window2.setStrokeStyle(1, 0x000000);
+      building.add(window2);
+    }
+    
+    // Door on ground floor (only on taller buildings)
+    if(bp.h >= 2) {
+      let door = this.add.rectangle(0, TILE_H/2 * bp.w - 8, 6, 10, 0x1f2937);
+      door.setStrokeStyle(1, 0x000000);
+      building.add(door);
+    }
+    
+    // Fire escape (only on h >= 3)
+    if(bp.h >= 3) {
+      for(let row = 0; row < windowRows - 1; row++) {
+        let fey = TILE_H/2 * bp.w - 15 - (row * 20);
+        let feLine = this.add.line(0, fey, -TILE_W/2 * bp.w + 5, 0, -TILE_W/2 * bp.w + 5, -15, 0xfbbf24);
+        feLine.setLineWidth(1);
+        building.add(feLine);
       }
     }
+    // === END FACADE DETAILS ===
     
     building.add([leftWall, rightWall, roof]);
     building.setDepth(bp.y * 10 - 5);
   }
   
-  // === PROPS (crates, barrels) ===
+  // === PROPS (crates, barrels, traffic lights, trash cans) ===
   let propPositions = [
     {x:9, y:7, type:'crate'},
     {x:13, y:8, type:'barrel'},
     {x:5, y:12, type:'crate'},
-    {x:10, y:15, type:'barrel'}
+    {x:10, y:15, type:'barrel'},
+    {x:6, y:5, type:'traffic_light'},
+    {x:15, y:10, type:'traffic_light'},
+    {x:4, y:14, type:'trash_can'},
+    {x:12, y:6, type:'trash_can'},
+    {x:8, y:18, type:'bench'},
+    {x:16, y:12, type:'bench'}
   ];
   
   for(let pp of propPositions) {
@@ -209,7 +271,7 @@ function create() {
       ], 0x92400e);
       crateTop.setStrokeStyle(2, 0x000000);
       crateTop.setDepth(pp.y * 10 - 2);
-    } else {
+    } else if(pp.type === 'barrel') {
       // Barrel
       let barrel = this.add.ellipse(px, py, 12, 8, 0x6b7280);
       barrel.setStrokeStyle(2, 0x000000);
@@ -218,6 +280,58 @@ function create() {
       let barrelTop = this.add.ellipse(px, py - 8, 12, 6, 0x9ca3af);
       barrelTop.setStrokeStyle(2, 0x000000);
       barrelTop.setDepth(pp.y * 10 - 2);
+    } else if(pp.type === 'traffic_light') {
+      // Traffic light pole
+      let pole = this.add.rectangle(px, py - 15, 3, 30, 0x1f2937);
+      pole.setStrokeStyle(2, 0x000000);
+      pole.setDepth(pp.y * 10 - 2);
+      
+      // Light box
+      let lightBox = this.add.rectangle(px, py - 28, 8, 12, 0x374151);
+      lightBox.setStrokeStyle(2, 0x000000);
+      lightBox.setDepth(pp.y * 10 - 2);
+      
+      // Red light
+      let redLight = this.add.circle(px, py - 32, 2, 0xef4444);
+      redLight.setDepth(pp.y * 10 - 1);
+      
+      // Yellow light
+      let yellowLight = this.add.circle(px, py - 28, 2, 0x6b7280);
+      yellowLight.setDepth(pp.y * 10 - 1);
+      
+      // Green light
+      let greenLight = this.add.circle(px, py - 24, 2, 0x10b981);
+      greenLight.setDepth(pp.y * 10 - 1);
+    } else if(pp.type === 'trash_can') {
+      // Trash can body
+      let body = this.add.polygon(px, py, [
+        -6, -8,
+        6, -8,
+        8, 0,
+        -8, 0
+      ], 0x4b5563);
+      body.setStrokeStyle(2, 0x000000);
+      body.setDepth(pp.y * 10 - 2);
+      
+      // Lid
+      let lid = this.add.ellipse(px, py - 8, 14, 6, 0x6b7280);
+      lid.setStrokeStyle(2, 0x000000);
+      lid.setDepth(pp.y * 10 - 1);
+    } else if(pp.type === 'bench') {
+      // Bench seat
+      let seat = this.add.rectangle(px, py - 6, 20, 6, 0x78350f);
+      seat.setStrokeStyle(2, 0x000000);
+      seat.setDepth(pp.y * 10 - 2);
+      
+      // Left leg
+      let leftLeg = this.add.rectangle(px - 7, py - 2, 3, 8, 0x1f2937);
+      leftLeg.setStrokeStyle(2, 0x000000);
+      leftLeg.setDepth(pp.y * 10 - 2);
+      
+      // Right leg
+      let rightLeg = this.add.rectangle(px + 7, py - 2, 3, 8, 0x1f2937);
+      rightLeg.setStrokeStyle(2, 0x000000);
+      rightLeg.setDepth(pp.y * 10 - 2);
     }
   }
   
@@ -299,16 +413,18 @@ function create() {
     let uIso = cartToIso(up.x, up.y);
     let u = this.add.container(uIso.x + offsetX, uIso.y + offsetY);
     
-    // Gangster sprite (blue)
-    let shadow = this.add.ellipse(0, 8, 16, 6, 0x000000, 0.3);
-    let body = this.add.ellipse(0, 0, 12, 18, 0x1e40af);
+    // Gangster sprite (smaller A: 16px instead of 32px)
+    // Hard shadow (C)
+    let shadow = this.add.rectangle(2, 10, UNIT_SIZE * 0.8, UNIT_SIZE * 0.3, 0x000000, 0.5);
+    
+    let body = this.add.ellipse(0, 0, UNIT_SIZE * 0.75, UNIT_SIZE * 1.125, 0x1e40af);
     body.setStrokeStyle(2, 0x000000);
-    let head = this.add.circle(0, -12, 6, 0xfbbf24);
+    let head = this.add.circle(0, -UNIT_SIZE * 0.75, UNIT_SIZE * 0.375, 0xfbbf24);
     head.setStrokeStyle(2, 0x000000);
-    let hat = this.add.ellipse(0, -16, 10, 4, 0x0a0d12);
+    let hat = this.add.ellipse(0, -UNIT_SIZE, UNIT_SIZE * 0.625, UNIT_SIZE * 0.25, 0x0a0d12);
     
     u.add([shadow, body, head, hat]);
-    u.setSize(20, 30);
+    u.setSize(UNIT_SIZE, UNIT_SIZE * 1.5);
     u.setInteractive();
     u.setDepth(up.y * 10);
     
@@ -337,15 +453,15 @@ function create() {
     let eIso = cartToIso(ep.x, ep.y);
     let e = this.add.container(eIso.x + offsetX, eIso.y + offsetY);
     
-    let shadow = this.add.ellipse(0, 8, 16, 6, 0x000000, 0.3);
-    let body = this.add.ellipse(0, 0, 12, 18, 0x7f1d1d);
+    let shadow = this.add.rectangle(2, 10, UNIT_SIZE * 0.8, UNIT_SIZE * 0.3, 0x000000, 0.5);
+    let body = this.add.ellipse(0, 0, UNIT_SIZE * 0.75, UNIT_SIZE * 1.125, 0x7f1d1d);
     body.setStrokeStyle(2, 0x000000);
-    let head = this.add.circle(0, -12, 6, 0xfbbf24);
+    let head = this.add.circle(0, -UNIT_SIZE * 0.75, UNIT_SIZE * 0.375, 0xfbbf24);
     head.setStrokeStyle(2, 0x000000);
-    let hat = this.add.ellipse(0, -16, 10, 4, 0x0a0d12);
+    let hat = this.add.ellipse(0, -UNIT_SIZE, UNIT_SIZE * 0.625, UNIT_SIZE * 0.25, 0x0a0d12);
     
     e.add([shadow, body, head, hat]);
-    e.setSize(20, 30);
+    e.setSize(UNIT_SIZE, UNIT_SIZE * 1.5);
     e.setDepth(ep.y * 10);
     
     e.health = 80;
@@ -369,27 +485,67 @@ function create() {
     e.healthBar = bar;
   }
   
+  // Unit count text
+  this.unitCountText = this.add.text(250, 650, '', {fontSize:'14px', color:'#fbbf24', fontStyle:'bold'});
+  this.unitCountText.setDepth(201);
+  
+  // Drag box graphics
+  dragBox = this.add.graphics();
+  dragBox.setDepth(150);
+  
   // === INPUT HANDLERS ===
+  
+  // Left mouse down - start drag
+  this.input.on('pointerdown', (pointer) => {
+    if(pointer.leftButtonDown() && pointer.y > 50 && pointer.y < 625) {
+      dragStart = {x: pointer.x, y: pointer.y};
+    }
+  });
+  
+  // Left mouse up - finish drag selection
+  this.input.on('pointerup', (pointer) => {
+    if(dragStart) {
+      let x1 = Math.min(dragStart.x, pointer.x);
+      let y1 = Math.min(dragStart.y, pointer.y);
+      let x2 = Math.max(dragStart.x, pointer.x);
+      let y2 = Math.max(dragStart.y, pointer.y);
+      
+      selectedUnits = [];
+      for(let u of units) {
+        if(u.health > 0 && u.x >= x1 && u.x <= x2 && u.y >= y1 && u.y <= y2) {
+          selectedUnits.push(u);
+        }
+      }
+      
+      dragStart = null;
+      dragBox.clear();
+    }
+  });
+  
+  // Right click - move selected units
   this.input.on('pointerdown', (pointer) => {
     if(pointer.rightButtonDown()) {
-      if(selectedUnit && selectedUnit.health > 0) {
-        // Convert screen click to grid coords
+      if(selectedUnits.length > 0) {
         let clickCart = isoToCart(pointer.x - offsetX, pointer.y - offsetY);
-        selectedUnit.moveTarget = {x: clickCart.x, y: clickCart.y};
-        selectedUnit.attackTarget = null;
+        
+        // Formation spread
+        for(let i=0; i<selectedUnits.length; i++) {
+          let angle = (i / selectedUnits.length) * Math.PI * 2;
+          let radius = Math.sqrt(selectedUnits.length) * 0.5;
+          let tx = clickCart.x + Math.cos(angle) * radius;
+          let ty = clickCart.y + Math.sin(angle) * radius;
+          
+          selectedUnits[i].moveTarget = {x: tx, y: ty};
+          selectedUnits[i].attackTarget = null;
+        }
       }
     }
   });
   
   this.input.on('gameobjectdown', (pointer, obj) => {
     if(obj.isPlayerUnit) {
-      if(selectedUnit) {
-        // Remove old selection ring
-        selectedUnit.list[1].setStrokeStyle(2, 0x000000);
-      }
-      selectedUnit = obj;
-      // Highlight selected unit
-      selectedUnit.list[1].setStrokeStyle(3, 0xfbbf24);
+      // Single-click unit = select only that unit
+      selectedUnits = [obj];
     } else if(obj === hq) {
       // Spawn unit
       if(playerMoney >= spawnCost) {
@@ -562,12 +718,81 @@ function update() {
     u.healthBar.fillRect(u.x - 15, u.y - 25, 30 * pct, 3);
   }
   
-  // Draw selection ring
+  // Draw selection rings + drag box + unit count
   this.selectionRing.clear();
-  if(selectedUnit && selectedUnit.health > 0) {
-    this.selectionRing.lineStyle(2, 0xfbbf24, 1);
-    this.selectionRing.strokeCircle(selectedUnit.x, selectedUnit.y + 5, 18);
+  for(let u of selectedUnits) {
+    if(u.health > 0) {
+      this.selectionRing.lineStyle(2, 0xfbbf24, 1);
+      this.selectionRing.strokeCircle(u.x, u.y + 5, 18);
+    }
   }
+  
+  // Draw drag box
+  if(dragStart) {
+    let pointer = this.input.activePointer;
+    let x1 = Math.min(dragStart.x, pointer.x);
+    let y1 = Math.min(dragStart.y, pointer.y);
+    let w = Math.abs(pointer.x - dragStart.x);
+    let h = Math.abs(pointer.y - dragStart.y);
+    
+    dragBox.clear();
+    dragBox.lineStyle(2, 0xfbbf24, 0.8);
+    dragBox.strokeRect(x1, y1, w, h);
+    dragBox.fillStyle(0xfbbf24, 0.1);
+    dragBox.fillRect(x1, y1, w, h);
+  }
+  
+  // Update unit count text
+  if(selectedUnits.length > 0) {
+    this.unitCountText.setText(selectedUnits.length + ' unit' + (selectedUnits.length > 1 ? 's' : '') + ' selected');
+  } else {
+    this.unitCountText.setText('');
+  }
+  
+  // === MINIMAP RENDERING (D: detail with building shapes + unit dots) ===
+  if(!this.minimapGfx) {
+    this.minimapGfx = this.add.graphics();
+    this.minimapGfx.setDepth(203);
+  }
+  this.minimapGfx.clear();
+  
+  const mmScale = 7; // 20x20 grid → 140x140 px minimap
+  const mmX = 22;
+  const mmY = 560;
+  
+  // Draw buildings (gray blocks)
+  for(let bp of buildingPositions) {
+    this.minimapGfx.fillStyle(0x4b5563, 0.8);
+    this.minimapGfx.fillRect(mmX + bp.x * mmScale, mmY + bp.y * mmScale, bp.w * mmScale, bp.h * mmScale);
+  }
+  
+  // Draw HQ (green)
+  this.minimapGfx.fillStyle(0x10b981, 1);
+  this.minimapGfx.fillRect(mmX + 3 * mmScale, mmY + 3 * mmScale, mmScale, mmScale);
+  
+  // Draw zones (gray outline)
+  for(let z of zones) {
+    let color = z.owner === 'player' ? 0x3b82f6 : (z.owner === 'enemy' ? 0xef4444 : 0x6b7280);
+    this.minimapGfx.fillStyle(color, 0.5);
+    this.minimapGfx.fillRect(mmX + z.gridX * mmScale, mmY + z.gridY * mmScale, mmScale, mmScale);
+  }
+  
+  // Draw player units (blue dots)
+  for(let u of units) {
+    if(u.health > 0) {
+      this.minimapGfx.fillStyle(0x3b82f6, 1);
+      this.minimapGfx.fillCircle(mmX + u.gridX * mmScale, mmY + u.gridY * mmScale, 2);
+    }
+  }
+  
+  // Draw enemy units (red dots)
+  for(let e of enemies) {
+    if(e.health > 0) {
+      this.minimapGfx.fillStyle(0xef4444, 1);
+      this.minimapGfx.fillCircle(mmX + e.gridX * mmScale, mmY + e.gridY * mmScale, 2);
+    }
+  }
+  // === END MINIMAP ===
   
   // Update enemies
   for(let e of enemies) {
