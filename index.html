@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Gangster RTS Prototype</title>
+  <script src="https://cdn.jsdelivr.net/npm/phaser@3.80.1/dist/phaser.min.js"></script>
+  <style>
+    body { margin:0; padding:0; background:#000; display:flex; justify-content:center; align-items:center; height:100vh; }
+    canvas { border:2px solid #333; }
+  </style>
+</head>
+<body>
+<script>
+const config = {
+  type: Phaser.AUTO,
+  width: 1200,
+  height: 675,
+  backgroundColor: '#1a1a1a',
+  scene: { preload, create, update }
+};
+
+const game = new Phaser.Game(config);
+
+let units = [];
+let selectedUnit = null;
+let enemies = [];
+let hq = null;
+let zones = [];
+let playerMoney = 100;
+let moneyText = null;
+let spawnCost = 50;
+
+function preload() {}
+
+function create() {
+  // Disable right-click context menu
+  this.input.mouse.disableContextMenu();
+  
+  // Money UI
+  moneyText = this.add.text(20, 20, 'Money: $' + playerMoney, {fontSize:'20px', color:'#fbbf24', fontStyle:'bold'});
+  
+  // Minimap (bottom-right)
+  let minimapX = 1120;
+  let minimapY = 580;
+  let minimapW = 160;
+  let minimapH = 90;
+  let minimapBg = this.add.rectangle(minimapX, minimapY, minimapW, minimapH, 0x0a0d12, 0.8);
+  minimapBg.setOrigin(0);
+  minimapBg.setStrokeStyle(2, 0x38bdf8);
+  minimapBg.setDepth(100);
+  
+  this.minimapGraphics = this.add.graphics();
+  this.minimapGraphics.setDepth(101);
+  
+  // 3 control zones (capture points)
+  let zonePositions = [{x:400, y:337}, {x:600, y:200}, {x:800, y:450}];
+  for(let pos of zonePositions) {
+    let z = this.add.circle(pos.x, pos.y, 60, 0x666666, 0.3);
+    z.setStrokeStyle(3, 0x999999);
+    z.owner = null; // null, 'player', 'enemy'
+    z.captureProgress = 0;
+    z.income = 10;
+    let label = this.add.text(pos.x, pos.y, '$' + z.income, {fontSize:'16px', color:'#fff'}).setOrigin(0.5);
+    z.label = label;
+    zones.push(z);
+  }
+  
+  // HQ (base building)
+  hq = this.add.container(100, 337);
+  
+  // Base structure
+  let hqBase = this.add.rectangle(0, 10, 60, 50, 0x047857);
+  hqBase.setStrokeStyle(3, 0x10b981);
+  // Roof
+  let roof = this.add.polygon(0, -15, [0,-15, -35,10, 35,10], 0x065f46);
+  // Door
+  let door = this.add.rectangle(0, 25, 12, 20, 0x0a0d12);
+  // Windows
+  let win1 = this.add.rectangle(-15, 5, 10, 10, 0xfcd34d);
+  let win2 = this.add.rectangle(15, 5, 10, 10, 0xfcd34d);
+  
+  hq.add([roof, hqBase, door, win1, win2]);
+  hq.setSize(70, 70);
+  hq.setInteractive();
+  
+  this.add.text(100, 370, 'HQ', {fontSize:'14px', color:'#fff', fontWeight: 'bold'}).setOrigin(0.5);
+  
+  // 4 player units (blue gangsters)
+  for(let i=0; i<4; i++) {
+    let u = this.add.container(200 + i*60, 300 + (i%2)*70);
+    
+    // Body (suit)
+    let body = this.add.rectangle(0, 5, 16, 24, 0x1e40af);
+    // Head
+    let head = this.add.circle(0, -8, 8, 0xfbbf24);
+    // Hat
+    let hat = this.add.rectangle(0, -14, 12, 4, 0x0a0d12);
+    // Legs
+    let leg1 = this.add.rectangle(-4, 20, 6, 12, 0x0f172a);
+    let leg2 = this.add.rectangle(4, 20, 6, 12, 0x0f172a);
+    
+    u.add([leg1, leg2, body, head, hat]);
+    u.setSize(40, 40);
+    u.setInteractive();
+    
+    u.health = 100;
+    u.maxHealth = 100;
+    u.moveTarget = null;
+    u.attackTarget = null;
+    u.isPlayerUnit = true;
+    u.attackRange = 100;
+    u.damage = 10;
+    u.attackSpeed = 30;
+    u.speed = 2;
+    units.push(u);
+    
+    // Health bar
+    let bar = this.add.graphics();
+    u.healthBar = bar;
+  }
+  
+  // 3 enemy units (red)
+  for(let i=0; i<3; i++) {
+    let e = this.add.container(900 + i*80, 200 + i*150);
+    
+    // Body (red suit)
+    let body = this.add.rectangle(0, 5, 16, 24, 0x7f1d1d);
+    // Head
+    let head = this.add.circle(0, -8, 8, 0xfbbf24);
+    // Hat
+    let hat = this.add.rectangle(0, -14, 12, 4, 0x0a0d12);
+    // Legs
+    let leg1 = this.add.rectangle(-4, 20, 6, 12, 0x0f172a);
+    let leg2 = this.add.rectangle(4, 20, 6, 12, 0x0f172a);
+    
+    e.add([leg1, leg2, body, head, hat]);
+    e.setSize(40, 40);
+    
+    e.health = 80;
+    e.maxHealth = 80;
+    e.moveTarget = null;
+    e.attackTarget = null;
+    e.isPlayerUnit = false;
+    e.attackRange = 100;
+    e.damage = 8;
+    e.attackSpeed = 40;
+    e.speed = 1.5;
+    e.aiState = 'patrol'; // patrol, attack, capture
+    e.patrolPoint = {x: 900 + i*80, y: 200 + i*150};
+    e.patrolRadius = 200;
+    enemies.push(e);
+    
+    let bar = this.add.graphics();
+    e.healthBar = bar;
+  }
+  
+  // Click handlers
+  this.input.on('gameobjectdown', (pointer, obj) => {
+    if(obj.isPlayerUnit) {
+      if(selectedUnit) selectedUnit.setStrokeStyle(0);
+      selectedUnit = obj;
+      selectedUnit.setStrokeStyle(3, 0xfbbf24);
+    } else if(obj === hq) {
+      // Click HQ to spawn unit
+      if(playerMoney >= spawnCost) {
+        let u = this.add.container(hq.x + 60, hq.y);
+        
+        // Body (suit)
+        let body = this.add.rectangle(0, 5, 16, 24, 0x1e40af);
+        // Head
+        let head = this.add.circle(0, -8, 8, 0xfbbf24);
+        // Hat
+        let hat = this.add.rectangle(0, -14, 12, 4, 0x0a0d12);
+        // Legs
+        let leg1 = this.add.rectangle(-4, 20, 6, 12, 0x0f172a);
+        let leg2 = this.add.rectangle(4, 20, 6, 12, 0x0f172a);
+        
+        u.add([leg1, leg2, body, head, hat]);
+        u.setSize(40, 40);
+        u.setInteractive();
+        
+        u.health = 100;
+        u.maxHealth = 100;
+        u.moveTarget = null;
+        u.attackTarget = null;
+        u.isPlayerUnit = true;
+        u.attackRange = 100;
+        u.damage = 10;
+        u.attackSpeed = 30;
+        u.speed = 2;
+        units.push(u);
+        
+        let bar = this.add.graphics();
+        u.healthBar = bar;
+        
+        playerMoney -= spawnCost;
+        moneyText.setText('Money: $' + playerMoney);
+      }
+    }
+  });
+  
+  this.input.on('pointerdown', (pointer) => {
+    if(pointer.rightButtonDown() && selectedUnit) {
+      // Check if clicking enemy
+      let clickedEnemy = null;
+      for(let e of enemies) {
+        let dist = Phaser.Math.Distance.Between(pointer.x, pointer.y, e.x, e.y);
+        if(dist < 20) {
+          clickedEnemy = e;
+          break;
+        }
+      }
+      
+      if(clickedEnemy) {
+        selectedUnit.attackTarget = clickedEnemy;
+        selectedUnit.moveTarget = null;
+      } else {
+        selectedUnit.moveTarget = {x: pointer.x, y: pointer.y};
+        selectedUnit.attackTarget = null;
+      }
+    }
+  });
+}
+
+function update() {
+  // Zone capture logic
+  for(let z of zones) {
+    let playerUnitsNear = 0;
+    let enemyUnitsNear = 0;
+    
+    for(let u of units) {
+      if(u.health <= 0) continue;
+      let d = Phaser.Math.Distance.Between(u.x, u.y, z.x, z.y);
+      if(d < 80) playerUnitsNear++;
+    }
+    
+    for(let e of enemies) {
+      if(e.health <= 0) continue;
+      let d = Phaser.Math.Distance.Between(e.x, e.y, z.x, z.y);
+      if(d < 80) enemyUnitsNear++;
+    }
+    
+    // Capture progress
+    if(playerUnitsNear > enemyUnitsNear) {
+      z.captureProgress += 0.5;
+      if(z.captureProgress >= 100) {
+        z.owner = 'player';
+        z.fillColor = 0x3b82f6;
+        z.captureProgress = 100;
+      }
+    } else if(enemyUnitsNear > playerUnitsNear) {
+      z.captureProgress -= 0.5;
+      if(z.captureProgress <= -100) {
+        z.owner = 'enemy';
+        z.fillColor = 0xef4444;
+        z.captureProgress = -100;
+      }
+    }
+  }
+  
+  // Income tick (every 180 frames = 3 sec)
+  if(!this.incomeTick) this.incomeTick = 0;
+  this.incomeTick++;
+  if(this.incomeTick >= 180) {
+    for(let z of zones) {
+      if(z.owner === 'player') playerMoney += z.income;
+    }
+    moneyText.setText('Money: $' + playerMoney);
+    this.incomeTick = 0;
+  }
+  
+  // Update minimap
+  let mmX = 1120;
+  let mmY = 580;
+  let scaleX = 160 / 1280;
+  let scaleY = 90 / 675;
+  this.minimapGraphics.clear();
+  
+  // Zones on minimap
+  for(let z of zones) {
+    let mx = mmX + z.x * scaleX;
+    let my = mmY + z.y * scaleY;
+    let color = z.owner === 'player' ? 0x3b82f6 : (z.owner === 'enemy' ? 0xef4444 : 0x666666);
+    this.minimapGraphics.fillStyle(color, 0.5);
+    this.minimapGraphics.fillCircle(mx, my, 3);
+  }
+  
+  // HQ on minimap
+  this.minimapGraphics.fillStyle(0x00ff00);
+  this.minimapGraphics.fillCircle(mmX + hq.x * scaleX, mmY + hq.y * scaleY, 3);
+  
+  // Units on minimap
+  for(let u of units) {
+    if(u.health <= 0) continue;
+    this.minimapGraphics.fillStyle(0x3b82f6);
+    this.minimapGraphics.fillCircle(mmX + u.x * scaleX, mmY + u.y * scaleY, 2);
+  }
+  for(let e of enemies) {
+    if(e.health <= 0) continue;
+    this.minimapGraphics.fillStyle(0xef4444);
+    this.minimapGraphics.fillCircle(mmX + e.x * scaleX, mmY + e.y * scaleY, 2);
+  }
+  
+  // Update player units
+  for(let u of units) {
+    if(u.health <= 0) {
+      u.setVisible(false);
+      u.healthBar.clear();
+      continue;
+    }
+    
+    // Attack behavior
+    if(u.attackTarget) {
+      if(u.attackTarget.health <= 0) {
+        u.attackTarget = null;
+      } else {
+        let dist = Phaser.Math.Distance.Between(u.x, u.y, u.attackTarget.x, u.attackTarget.y);
+        if(dist > u.attackRange) {
+          // Move closer
+          let angle = Phaser.Math.Angle.Between(u.x, u.y, u.attackTarget.x, u.attackTarget.y);
+          u.x += Math.cos(angle) * u.speed;
+          u.y += Math.sin(angle) * u.speed;
+        } else {
+          // In range, attack
+          if(!u.attackCooldown) u.attackCooldown = 0;
+          u.attackCooldown++;
+          if(u.attackCooldown >= u.attackSpeed) {
+            u.attackTarget.health -= u.damage;
+            u.attackCooldown = 0;
+            
+            // Muzzle flash
+            let flash = this.add.circle(u.x, u.y, 15, 0x38bdf8, 0.8);
+            this.tweens.add({
+              targets: flash,
+              alpha: 0,
+              duration: 100,
+              onComplete: () => flash.destroy()
+            });
+          }
+        }
+      }
+    } else if(u.moveTarget) {
+      // Move to point
+      let dist = Phaser.Math.Distance.Between(u.x, u.y, u.moveTarget.x, u.moveTarget.y);
+      if(dist > 5) {
+        let angle = Phaser.Math.Angle.Between(u.x, u.y, u.moveTarget.x, u.moveTarget.y);
+        u.x += Math.cos(angle) * u.speed;
+        u.y += Math.sin(angle) * u.speed;
+      } else {
+        u.moveTarget = null;
+      }
+    }
+    
+    // Draw health bar
+    u.healthBar.clear();
+    u.healthBar.fillStyle(0x000000, 0.5);
+    u.healthBar.fillRect(u.x - 20, u.y - 30, 40, 4);
+    let hpWidth = (u.health / u.maxHealth) * 40;
+    u.healthBar.fillStyle(u.isPlayerUnit ? 0x3b82f6 : 0xef4444);
+    u.healthBar.fillRect(u.x - 20, u.y - 30, hpWidth, 4);
+  }
+  
+  // Update enemies
+  for(let e of enemies) {
+    if(e.health <= 0) {
+      e.setVisible(false);
+      e.healthBar.clear();
+      continue;
+    }
+    
+    // AI state machine
+    // 1. Check for nearby player units (aggro range 250)
+    let nearestPlayer = null;
+    let nearestDist = 250;
+    for(let u of units) {
+      if(u.health <= 0) continue;
+      let d = Phaser.Math.Distance.Between(e.x, e.y, u.x, u.y);
+      if(d < nearestDist) {
+        nearestDist = d;
+        nearestPlayer = u;
+      }
+    }
+    
+    if(nearestPlayer) {
+      // ATTACK mode
+      e.aiState = 'attack';
+      e.attackTarget = nearestPlayer;
+    } else if(!e.attackTarget || e.attackTarget.health <= 0) {
+      // No target, check for zones to capture
+      let nearestZone = null;
+      let zoneDist = 99999;
+      for(let z of zones) {
+        if(z.owner === 'enemy') continue; // skip owned zones
+        let d = Phaser.Math.Distance.Between(e.x, e.y, z.x, z.y);
+        if(d < zoneDist) {
+          zoneDist = d;
+          nearestZone = z;
+        }
+      }
+      
+      if(nearestZone && zoneDist < 400) {
+        // CAPTURE mode - move to zone
+        e.aiState = 'capture';
+        e.moveTarget = {x: nearestZone.x, y: nearestZone.y};
+        e.attackTarget = null;
+      } else {
+        // PATROL mode
+        e.aiState = 'patrol';
+        e.attackTarget = null;
+        if(!e.moveTarget) {
+          let angle = Math.random() * Math.PI * 2;
+          e.moveTarget = {
+            x: e.patrolPoint.x + Math.cos(angle) * e.patrolRadius,
+            y: e.patrolPoint.y + Math.sin(angle) * e.patrolRadius
+          };
+        }
+      }
+    }
+    
+    // Execute behavior
+    if(e.attackTarget && e.attackTarget.health > 0) {
+      let dist = Phaser.Math.Distance.Between(e.x, e.y, e.attackTarget.x, e.attackTarget.y);
+      if(dist > e.attackRange) {
+        let angle = Phaser.Math.Angle.Between(e.x, e.y, e.attackTarget.x, e.attackTarget.y);
+        e.x += Math.cos(angle) * e.speed;
+        e.y += Math.sin(angle) * e.speed;
+      } else {
+        if(!e.attackCooldown) e.attackCooldown = 0;
+        e.attackCooldown++;
+        if(e.attackCooldown >= e.attackSpeed) {
+          e.attackTarget.health -= e.damage;
+          e.attackCooldown = 0;
+          
+          // Muzzle flash effect
+          let flash = this.add.circle(e.x, e.y, 15, 0xfbbf24, 0.8);
+          this.tweens.add({
+            targets: flash,
+            alpha: 0,
+            duration: 100,
+            onComplete: () => flash.destroy()
+          });
+        }
+      }
+    } else if(e.moveTarget) {
+      let dist = Phaser.Math.Distance.Between(e.x, e.y, e.moveTarget.x, e.moveTarget.y);
+      if(dist > 10) {
+        let angle = Phaser.Math.Angle.Between(e.x, e.y, e.moveTarget.x, e.moveTarget.y);
+        e.x += Math.cos(angle) * e.speed;
+        e.y += Math.sin(angle) * e.speed;
+      } else {
+        e.moveTarget = null;
+      }
+    }
+    
+    // Draw health bar
+    e.healthBar.clear();
+    e.healthBar.fillStyle(0x000000, 0.5);
+    e.healthBar.fillRect(e.x - 20, e.y - 30, 40, 4);
+    let hpWidth = (e.health / e.maxHealth) * 40;
+    e.healthBar.fillStyle(0xef4444);
+    e.healthBar.fillRect(e.x - 20, e.y - 30, hpWidth, 4);
+  }
+}
+</script>
+</body>
+</html>
