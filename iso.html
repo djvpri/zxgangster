@@ -1,0 +1,684 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Gangster RTS - Isometric</title>
+  <script src="https://cdn.jsdelivr.net/npm/phaser@3.80.1/dist/phaser.min.js"></script>
+  <style>
+    body { margin:0; padding:0; background:#000; display:flex; justify-content:center; align-items:center; height:100vh; }
+    canvas { border:2px solid #333; }
+  </style>
+</head>
+<body>
+<script>
+const config = {
+  type: Phaser.AUTO,
+  width: 1200,
+  height: 675,
+  backgroundColor: '#0F131C',
+  scene: { create, update }
+};
+
+const game = new Phaser.Game(config);
+
+// Isometric helpers
+const TILE_W = 64;
+const TILE_H = 32;
+
+function cartToIso(x, y) {
+  return {
+    x: (x - y) * (TILE_W / 2),
+    y: (x + y) * (TILE_H / 2)
+  };
+}
+
+function isoToCart(x, y) {
+  return {
+    x: (x / (TILE_W / 2) + y / (TILE_H / 2)) / 2,
+    y: (y / (TILE_H / 2) - x / (TILE_W / 2)) / 2
+  };
+}
+
+let units = [];
+let enemies = [];
+let selectedUnit = null;
+let hq = null;
+let zones = [];
+let playerMoney = 100;
+let moneyText = null;
+let spawnCost = 50;
+
+let gridW = 20;
+let gridH = 20;
+let offsetX = 600;
+let offsetY = 100;
+
+function create() {
+  this.input.mouse.disableContextMenu();
+  
+  // === TOP HUD BAR ===
+  let topBar = this.add.rectangle(600, 25, 1200, 50, 0x0A0D12, 0.95);
+  topBar.setDepth(200);
+  
+  moneyText = this.add.text(30, 18, 'Resources: $' + playerMoney, {fontSize:'18px', color:'#10b981', fontStyle:'bold'});
+  moneyText.setDepth(201);
+  
+  this.timeText = this.add.text(600, 18, 'Time: 12:00', {fontSize:'16px', color:'#e5e7eb'}).setOrigin(0.5);
+  this.timeText.setDepth(201);
+  
+  this.add.text(950, 18, 'BULLDOGS', {fontSize:'16px', color:'#38bdf8', fontStyle:'bold'}).setDepth(201);
+  this.add.text(1080, 18, 'vs', {fontSize:'14px', color:'#9ca3af'}).setOrigin(0.5).setDepth(201);
+  this.add.text(1120, 18, 'RIVALS', {fontSize:'16px', color:'#ef4444', fontStyle:'bold'}).setDepth(201);
+  
+  // === BOTTOM HUD BAR ===
+  let botBar = this.add.rectangle(600, 650, 1200, 50, 0x0A0D12, 0.95);
+  botBar.setDepth(200);
+  
+  let minimapBg = this.add.rectangle(20, 630, 160, 90, 0x161D2B, 1);
+  minimapBg.setOrigin(0, 1);
+  minimapBg.setStrokeStyle(2, 0x38bdf8);
+  minimapBg.setDepth(201);
+  
+  this.add.text(100, 632, 'MINIMAP', {fontSize:'12px', color:'#6b7280'}).setOrigin(0.5, 0).setDepth(201);
+  
+  this.add.text(250, 632, 'UNIT SELECTION', {fontSize:'12px', color:'#6b7280'}).setOrigin(0, 0).setDepth(201);
+  this.add.text(900, 632, 'INFO PANEL', {fontSize:'12px', color:'#6b7280'}).setOrigin(0, 0).setDepth(201);
+  
+  // === ISOMETRIC GRID (streets + buildings) ===
+  let gridGfx = this.add.graphics();
+  
+  for(let gx=0; gx<gridW; gx++) {
+    for(let gy=0; gy<gridH; gy++) {
+      let iso = cartToIso(gx, gy);
+      let x = iso.x + offsetX;
+      let y = iso.y + offsetY;
+      
+      // Street tiles (darker)
+      gridGfx.fillStyle(0x1e293b, 1);
+      gridGfx.beginPath();
+      gridGfx.moveTo(x, y);
+      gridGfx.lineTo(x + TILE_W/2, y + TILE_H/2);
+      gridGfx.lineTo(x, y + TILE_H);
+      gridGfx.lineTo(x - TILE_W/2, y + TILE_H/2);
+      gridGfx.closePath();
+      gridGfx.fillPath();
+      
+      // Grid lines
+      gridGfx.lineStyle(1, 0x334155, 0.5);
+      gridGfx.strokePath();
+    }
+  }
+  
+  // === BACKGROUND BUILDINGS (decoration) ===
+  let buildingPositions = [
+    {x:1, y:1, w:1, h:2, color:0x374151},
+    {x:7, y:1, w:2, h:3, color:0x475569},
+    {x:11, y:2, w:1, h:2, color:0x4b5563},
+    {x:17, y:4, w:2, h:3, color:0x374151},
+    {x:2, y:8, w:1, h:2, color:0x475569},
+    {x:18, y:15, w:1, h:3, color:0x4b5563},
+    {x:1, y:17, w:2, h:2, color:0x374151}
+  ];
+  
+  for(let bp of buildingPositions) {
+    let bIso = cartToIso(bp.x, bp.y);
+    let bx = bIso.x + offsetX;
+    let by = bIso.y + offsetY;
+    let buildingHeight = bp.h * 20;
+    
+    // Building container
+    let building = this.add.container(bx, by);
+    
+    // Left wall
+    let leftWall = this.add.polygon(0, 0, [
+      -TILE_W/2 * bp.w, TILE_H/2 * bp.w,
+      -TILE_W/2 * bp.w, TILE_H/2 * bp.w - buildingHeight,
+      0, -buildingHeight,
+      0, 0
+    ], bp.color);
+    leftWall.setStrokeStyle(2, 0x000000);
+    
+    // Right wall (lighter)
+    let rightColor = Phaser.Display.Color.IntegerToColor(bp.color);
+    rightColor = Phaser.Display.Color.GetColor(
+      Math.min(255, rightColor.r + 20),
+      Math.min(255, rightColor.g + 20),
+      Math.min(255, rightColor.b + 20)
+    );
+    
+    let rightWall = this.add.polygon(0, 0, [
+      0, 0,
+      0, -buildingHeight,
+      TILE_W/2 * bp.w, TILE_H/2 * bp.w - buildingHeight,
+      TILE_W/2 * bp.w, TILE_H/2 * bp.w
+    ], rightColor);
+    rightWall.setStrokeStyle(2, 0x000000);
+    
+    // Roof
+    let roof = this.add.polygon(0, -buildingHeight, [
+      0, 0,
+      TILE_W/2 * bp.w, TILE_H/2 * bp.w,
+      0, TILE_H * bp.w,
+      -TILE_W/2 * bp.w, TILE_H/2 * bp.w
+    ], 0x64748b);
+    roof.setStrokeStyle(2, 0x000000);
+    
+    // Windows (random placement)
+    for(let i=0; i<bp.h; i++) {
+      if(Math.random() > 0.3) {
+        let wx = (Math.random() - 0.5) * TILE_W * bp.w * 0.5;
+        let wy = -buildingHeight + 10 + i * 15;
+        let win = this.add.rectangle(wx, wy, 6, 8, 0xfcd34d, 0.8);
+        building.add(win);
+      }
+    }
+    
+    building.add([leftWall, rightWall, roof]);
+    building.setDepth(bp.y * 10 - 5);
+  }
+  
+  // === PROPS (crates, barrels) ===
+  let propPositions = [
+    {x:9, y:7, type:'crate'},
+    {x:13, y:8, type:'barrel'},
+    {x:5, y:12, type:'crate'},
+    {x:10, y:15, type:'barrel'}
+  ];
+  
+  for(let pp of propPositions) {
+    let pIso = cartToIso(pp.x, pp.y);
+    let px = pIso.x + offsetX;
+    let py = pIso.y + offsetY;
+    
+    if(pp.type === 'crate') {
+      // Small crate
+      let crate = this.add.polygon(px, py, [
+        0, 0,
+        8, 4,
+        0, 8,
+        -8, 4
+      ], 0x78350f);
+      crate.setStrokeStyle(2, 0x000000);
+      crate.setDepth(pp.y * 10 - 2);
+      
+      let crateTop = this.add.polygon(px, py - 6, [
+        0, 0,
+        8, 4,
+        0, 8,
+        -8, 4
+      ], 0x92400e);
+      crateTop.setStrokeStyle(2, 0x000000);
+      crateTop.setDepth(pp.y * 10 - 2);
+    } else {
+      // Barrel
+      let barrel = this.add.ellipse(px, py, 12, 8, 0x6b7280);
+      barrel.setStrokeStyle(2, 0x000000);
+      barrel.setDepth(pp.y * 10 - 2);
+      
+      let barrelTop = this.add.ellipse(px, py - 8, 12, 6, 0x9ca3af);
+      barrelTop.setStrokeStyle(2, 0x000000);
+      barrelTop.setDepth(pp.y * 10 - 2);
+    }
+  }
+  
+  // === BUILDINGS (isometric blocks) ===
+  // HQ at grid position (3, 3)
+  let hqCart = {x: 3, y: 3};
+  let hqIso = cartToIso(hqCart.x, hqCart.y);
+  hq = this.add.container(hqIso.x + offsetX, hqIso.y + offsetY);
+  
+  // Building base (green)
+  let base = this.add.polygon(0, 0, [
+    0, 0,
+    TILE_W/2, TILE_H/2,
+    0, TILE_H,
+    -TILE_W/2, TILE_H/2
+  ], 0x047857);
+  base.setStrokeStyle(2, 0x000000);
+  
+  // Building sides (walls)
+  let leftWall = this.add.polygon(0, 0, [
+    -TILE_W/2, TILE_H/2,
+    -TILE_W/2, TILE_H/2 - 40,
+    0, -40,
+    0, 0
+  ], 0x065f46);
+  leftWall.setStrokeStyle(2, 0x000000);
+  
+  let rightWall = this.add.polygon(0, 0, [
+    0, 0,
+    0, -40,
+    TILE_W/2, TILE_H/2 - 40,
+    TILE_W/2, TILE_H/2
+  ], 0x059669);
+  rightWall.setStrokeStyle(2, 0x000000);
+  
+  // Roof
+  let roof = this.add.polygon(0, -40, [
+    0, -10,
+    TILE_W/2, TILE_H/2 - 10,
+    0, TILE_H - 10,
+    -TILE_W/2, TILE_H/2 - 10
+  ], 0x10b981);
+  roof.setStrokeStyle(2, 0x000000);
+  
+  hq.add([leftWall, rightWall, base, roof]);
+  hq.setSize(TILE_W, TILE_H + 40);
+  hq.setInteractive();
+  hq.setDepth(hqCart.y * 10);
+  
+  this.add.text(hq.x, hq.y + 50, 'HQ', {fontSize:'12px', color:'#fff', fontWeight:'bold'}).setOrigin(0.5).setDepth(hqCart.y * 10 + 1);
+  
+  // Selection ring graphics container
+  this.selectionRing = this.add.graphics();
+  this.selectionRing.setDepth(199);
+  
+  // === CONTROL ZONES ===
+  let zonePositions = [{x:8, y:5}, {x:12, y:10}, {x:6, y:14}];
+  for(let zp of zonePositions) {
+    let zIso = cartToIso(zp.x, zp.y);
+    let z = this.add.polygon(zIso.x + offsetX, zIso.y + offsetY, [
+      0, 0,
+      TILE_W/2 + 20, TILE_H/2 + 10,
+      0, TILE_H + 20,
+      -TILE_W/2 - 20, TILE_H/2 + 10
+    ], 0x6b7280, 0.2);
+    z.setStrokeStyle(3, 0x9ca3af, 0.6);
+    z.setDepth(zp.y * 10 - 1);
+    z.owner = 'neutral';
+    z.captureProgress = 0;
+    z.income = 10;
+    z.gridX = zp.x;
+    z.gridY = zp.y;
+    zones.push(z);
+  }
+  
+  // === PLAYER UNITS (isometric gangsters) ===
+  let unitPositions = [{x:4, y:4}, {x:5, y:4}, {x:4, y:5}, {x:5, y:5}];
+  for(let up of unitPositions) {
+    let uIso = cartToIso(up.x, up.y);
+    let u = this.add.container(uIso.x + offsetX, uIso.y + offsetY);
+    
+    // Gangster sprite (blue)
+    let shadow = this.add.ellipse(0, 8, 16, 6, 0x000000, 0.3);
+    let body = this.add.ellipse(0, 0, 12, 18, 0x1e40af);
+    body.setStrokeStyle(2, 0x000000);
+    let head = this.add.circle(0, -12, 6, 0xfbbf24);
+    head.setStrokeStyle(2, 0x000000);
+    let hat = this.add.ellipse(0, -16, 10, 4, 0x0a0d12);
+    
+    u.add([shadow, body, head, hat]);
+    u.setSize(20, 30);
+    u.setInteractive();
+    u.setDepth(up.y * 10);
+    
+    u.health = 100;
+    u.maxHealth = 100;
+    u.gridX = up.x;
+    u.gridY = up.y;
+    u.moveTarget = null;
+    u.attackTarget = null;
+    u.isPlayerUnit = true;
+    u.attackRange = 2; // grid units
+    u.damage = 10;
+    u.attackSpeed = 30;
+    u.speed = 0.05; // grid units per frame
+    
+    units.push(u);
+    
+    let bar = this.add.graphics();
+    bar.setDepth(up.y * 10 + 1);
+    u.healthBar = bar;
+  }
+  
+  // === ENEMY UNITS (red gangsters) ===
+  let enemyPositions = [{x:15, y:10}, {x:16, y:11}, {x:14, y:12}];
+  for(let ep of enemyPositions) {
+    let eIso = cartToIso(ep.x, ep.y);
+    let e = this.add.container(eIso.x + offsetX, eIso.y + offsetY);
+    
+    let shadow = this.add.ellipse(0, 8, 16, 6, 0x000000, 0.3);
+    let body = this.add.ellipse(0, 0, 12, 18, 0x7f1d1d);
+    body.setStrokeStyle(2, 0x000000);
+    let head = this.add.circle(0, -12, 6, 0xfbbf24);
+    head.setStrokeStyle(2, 0x000000);
+    let hat = this.add.ellipse(0, -16, 10, 4, 0x0a0d12);
+    
+    e.add([shadow, body, head, hat]);
+    e.setSize(20, 30);
+    e.setDepth(ep.y * 10);
+    
+    e.health = 80;
+    e.maxHealth = 80;
+    e.gridX = ep.x;
+    e.gridY = ep.y;
+    e.moveTarget = null;
+    e.attackTarget = null;
+    e.isPlayerUnit = false;
+    e.attackRange = 2;
+    e.damage = 8;
+    e.attackSpeed = 40;
+    e.speed = 0.04;
+    e.aiState = 'patrol';
+    e.patrolOrigin = {x: ep.x, y: ep.y};
+    
+    enemies.push(e);
+    
+    let bar = this.add.graphics();
+    bar.setDepth(ep.y * 10 + 1);
+    e.healthBar = bar;
+  }
+  
+  // === INPUT HANDLERS ===
+  this.input.on('pointerdown', (pointer) => {
+    if(pointer.rightButtonDown()) {
+      if(selectedUnit && selectedUnit.health > 0) {
+        // Convert screen click to grid coords
+        let clickCart = isoToCart(pointer.x - offsetX, pointer.y - offsetY);
+        selectedUnit.moveTarget = {x: clickCart.x, y: clickCart.y};
+        selectedUnit.attackTarget = null;
+      }
+    }
+  });
+  
+  this.input.on('gameobjectdown', (pointer, obj) => {
+    if(obj.isPlayerUnit) {
+      if(selectedUnit) {
+        // Remove old selection ring
+        selectedUnit.list[1].setStrokeStyle(2, 0x000000);
+      }
+      selectedUnit = obj;
+      // Highlight selected unit
+      selectedUnit.list[1].setStrokeStyle(3, 0xfbbf24);
+    } else if(obj === hq) {
+      // Spawn unit
+      if(playerMoney >= spawnCost) {
+        let spawnCart = {x: hqCart.x + 1, y: hqCart.y};
+        let spawnIso = cartToIso(spawnCart.x, spawnCart.y);
+        let u = this.add.container(spawnIso.x + offsetX, spawnIso.y + offsetY);
+        
+        let shadow = this.add.ellipse(0, 8, 16, 6, 0x000000, 0.3);
+        let body = this.add.ellipse(0, 0, 12, 18, 0x1e40af);
+        body.setStrokeStyle(2, 0x000000);
+        let head = this.add.circle(0, -12, 6, 0xfbbf24);
+        head.setStrokeStyle(2, 0x000000);
+        let hat = this.add.ellipse(0, -16, 10, 4, 0x0a0d12);
+        
+        u.add([shadow, body, head, hat]);
+        u.setSize(20, 30);
+        u.setInteractive();
+        u.setDepth(spawnCart.y * 10);
+        
+        u.health = 100;
+        u.maxHealth = 100;
+        u.gridX = spawnCart.x;
+        u.gridY = spawnCart.y;
+        u.moveTarget = null;
+        u.attackTarget = null;
+        u.isPlayerUnit = true;
+        u.attackRange = 2;
+        u.damage = 10;
+        u.attackSpeed = 30;
+        u.speed = 0.05;
+        
+        units.push(u);
+        
+        let bar = this.add.graphics();
+        bar.setDepth(spawnCart.y * 10 + 1);
+        u.healthBar = bar;
+        
+        playerMoney -= spawnCost;
+        moneyText.setText('Resources: $' + playerMoney);
+      }
+    } else if(!obj.isPlayerUnit && obj.health !== undefined) {
+      // Attack enemy
+      if(selectedUnit && selectedUnit.health > 0) {
+        selectedUnit.attackTarget = obj;
+        selectedUnit.moveTarget = null;
+      }
+    }
+  });
+}
+
+function update() {
+  // Zone capture
+  for(let z of zones) {
+    let playerNear = 0;
+    let enemyNear = 0;
+    
+    for(let u of units) {
+      if(u.health <= 0) continue;
+      let d = Math.abs(u.gridX - z.gridX) + Math.abs(u.gridY - z.gridY);
+      if(d < 2) playerNear++;
+    }
+    
+    for(let e of enemies) {
+      if(e.health <= 0) continue;
+      let d = Math.abs(e.gridX - z.gridX) + Math.abs(e.gridY - z.gridY);
+      if(d < 2) enemyNear++;
+    }
+    
+    if(playerNear > enemyNear) {
+      z.captureProgress += 0.5;
+      if(z.captureProgress >= 100) {
+        z.owner = 'player';
+        z.fillColor = 0x3b82f6;
+        z.captureProgress = 100;
+      }
+    } else if(enemyNear > playerNear) {
+      z.captureProgress -= 0.5;
+      if(z.captureProgress <= -100) {
+        z.owner = 'enemy';
+        z.fillColor = 0xef4444;
+        z.captureProgress = -100;
+      }
+    }
+  }
+  
+  // Income tick
+  if(!this.incomeTick) this.incomeTick = 0;
+  this.incomeTick++;
+  if(this.incomeTick >= 180) {
+    for(let z of zones) {
+      if(z.owner === 'player') playerMoney += z.income;
+    }
+    moneyText.setText('Resources: $' + playerMoney);
+    this.incomeTick = 0;
+  }
+  
+  // Update player units
+  for(let u of units) {
+    if(u.health <= 0) {
+      u.setVisible(false);
+      u.healthBar.clear();
+      continue;
+    }
+    
+    // Attack behavior
+    if(u.attackTarget) {
+      if(u.attackTarget.health <= 0) {
+        u.attackTarget = null;
+      } else {
+        let d = Math.abs(u.gridX - u.attackTarget.gridX) + Math.abs(u.gridY - u.attackTarget.gridY);
+        if(d > u.attackRange) {
+          // Move closer
+          u.moveTarget = {x: u.attackTarget.gridX, y: u.attackTarget.gridY};
+        } else {
+          // In range, attack
+          u.moveTarget = null;
+          if(!u.attackCooldown) u.attackCooldown = 0;
+          u.attackCooldown++;
+          if(u.attackCooldown >= u.attackSpeed) {
+            u.attackTarget.health -= u.damage;
+            u.attackCooldown = 0;
+            
+            // Muzzle flash
+            let flash = this.add.circle(u.x, u.y - 10, 8, 0x38bdf8, 0.8);
+            flash.setDepth(u.depth + 1);
+            this.tweens.add({
+              targets: flash,
+              alpha: 0,
+              duration: 100,
+              onComplete: () => flash.destroy()
+            });
+          }
+        }
+      }
+    }
+    
+    // Movement with bobbing animation
+    if(u.moveTarget && !u.attackTarget) {
+      let dx = u.moveTarget.x - u.gridX;
+      let dy = u.moveTarget.y - u.gridY;
+      let dist = Math.sqrt(dx*dx + dy*dy);
+      
+      if(dist < 0.1) {
+        u.moveTarget = null;
+        u.list[1].y = 0; // reset body position
+      } else {
+        u.gridX += (dx / dist) * u.speed;
+        u.gridY += (dy / dist) * u.speed;
+        
+        // Bobbing effect while walking
+        if(!u.walkFrame) u.walkFrame = 0;
+        u.walkFrame += 0.2;
+        u.list[1].y = Math.sin(u.walkFrame) * 1.5; // body bob
+        u.list[2].y = -12 + Math.sin(u.walkFrame) * 1.5; // head bob
+        u.list[3].y = -16 + Math.sin(u.walkFrame) * 1.5; // hat bob
+        
+        let newIso = cartToIso(u.gridX, u.gridY);
+        u.x = newIso.x + offsetX;
+        u.y = newIso.y + offsetY;
+        u.setDepth(Math.floor(u.gridY) * 10);
+      }
+    }
+    
+    // Health bar
+    u.healthBar.clear();
+    u.healthBar.fillStyle(0x000000, 0.5);
+    u.healthBar.fillRect(u.x - 15, u.y - 25, 30, 3);
+    let pct = u.health / u.maxHealth;
+    u.healthBar.fillStyle(pct > 0.3 ? 0x10b981 : 0xef4444);
+    u.healthBar.fillRect(u.x - 15, u.y - 25, 30 * pct, 3);
+  }
+  
+  // Draw selection ring
+  this.selectionRing.clear();
+  if(selectedUnit && selectedUnit.health > 0) {
+    this.selectionRing.lineStyle(2, 0xfbbf24, 1);
+    this.selectionRing.strokeCircle(selectedUnit.x, selectedUnit.y + 5, 18);
+  }
+  
+  // Update enemies
+  for(let e of enemies) {
+    if(e.health <= 0) {
+      e.setVisible(false);
+      e.healthBar.clear();
+      continue;
+    }
+    
+    // AI state machine
+    let nearestPlayer = null;
+    let nearestDist = 5;
+    for(let u of units) {
+      if(u.health <= 0) continue;
+      let d = Math.abs(e.gridX - u.gridX) + Math.abs(e.gridY - u.gridY);
+      if(d < nearestDist) {
+        nearestDist = d;
+        nearestPlayer = u;
+      }
+    }
+    
+    if(nearestPlayer) {
+      // ATTACK mode
+      e.attackTarget = nearestPlayer;
+      e.aiState = 'attack';
+      
+      let d = Math.abs(e.gridX - nearestPlayer.gridX) + Math.abs(e.gridY - nearestPlayer.gridY);
+      if(d > e.attackRange) {
+        e.moveTarget = {x: nearestPlayer.gridX, y: nearestPlayer.gridY};
+      } else {
+        e.moveTarget = null;
+        if(!e.attackCooldown) e.attackCooldown = 0;
+        e.attackCooldown++;
+        if(e.attackCooldown >= e.attackSpeed) {
+          nearestPlayer.health -= e.damage;
+          e.attackCooldown = 0;
+          
+          // Muzzle flash
+          let flash = this.add.circle(e.x, e.y - 10, 8, 0xfbbf24, 0.8);
+          flash.setDepth(e.depth + 1);
+          this.tweens.add({
+            targets: flash,
+            alpha: 0,
+            duration: 100,
+            onComplete: () => flash.destroy()
+          });
+        }
+      }
+    } else {
+      // CAPTURE or PATROL
+      let nearestZone = null;
+      let zDist = 999;
+      for(let z of zones) {
+        if(z.owner === 'enemy') continue;
+        let d = Math.abs(e.gridX - z.gridX) + Math.abs(e.gridY - z.gridY);
+        if(d < zDist && d < 8) {
+          zDist = d;
+          nearestZone = z;
+        }
+      }
+      
+      if(nearestZone) {
+        e.aiState = 'capture';
+        e.moveTarget = {x: nearestZone.gridX, y: nearestZone.gridY};
+      } else {
+        // PATROL
+        e.aiState = 'patrol';
+        if(!e.moveTarget || Math.random() < 0.01) {
+          let px = e.patrolOrigin.x + (Math.random() - 0.5) * 4;
+          let py = e.patrolOrigin.y + (Math.random() - 0.5) * 4;
+          e.moveTarget = {x: px, y: py};
+        }
+      }
+    }
+    
+    // Movement with bobbing animation
+    if(e.moveTarget) {
+      let dx = e.moveTarget.x - e.gridX;
+      let dy = e.moveTarget.y - e.gridY;
+      let dist = Math.sqrt(dx*dx + dy*dy);
+      
+      if(dist < 0.1) {
+        e.moveTarget = null;
+        e.list[1].y = 0; // reset body position
+      } else {
+        e.gridX += (dx / dist) * e.speed;
+        e.gridY += (dy / dist) * e.speed;
+        
+        // Bobbing effect while walking
+        if(!e.walkFrame) e.walkFrame = 0;
+        e.walkFrame += 0.2;
+        e.list[1].y = Math.sin(e.walkFrame) * 1.5; // body bob
+        e.list[2].y = -12 + Math.sin(e.walkFrame) * 1.5; // head bob
+        e.list[3].y = -16 + Math.sin(e.walkFrame) * 1.5; // hat bob
+        
+        let newIso = cartToIso(e.gridX, e.gridY);
+        e.x = newIso.x + offsetX;
+        e.y = newIso.y + offsetY;
+        e.setDepth(Math.floor(e.gridY) * 10);
+      }
+    }
+    
+    // Health bar
+    e.healthBar.clear();
+    e.healthBar.fillStyle(0x000000, 0.5);
+    e.healthBar.fillRect(e.x - 15, e.y - 25, 30, 3);
+    let pct = e.health / e.maxHealth;
+    e.healthBar.fillStyle(pct > 0.3 ? 0x10b981 : 0xef4444);
+    e.healthBar.fillRect(e.x - 15, e.y - 25, 30 * pct, 3);
+  }
+}
+</script>
+</body>
+</html>
